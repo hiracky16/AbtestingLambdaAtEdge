@@ -1,0 +1,141 @@
+service:
+  name: edge-abtest
+# app and org for use with dashboard.serverless.com
+#app: your-app-name
+#org: your-org-name
+
+package:
+  exclude:
+    - 'node_modules/**'
+
+custom:
+  webpack:
+    webpackConfig: ./webpack.config.js
+    includeModules: true
+  defaultRegion: us-east-1
+  defaultEnvironmentGroup: dev
+  region: ${opt:region, self:custom.defaultRegion}
+  stage: ${opt:stage, env:USER}
+  objectPrefix: '${self:service}-${self:custom.stage}'
+
+
+# Add the serverless-webpack plugin
+plugins:
+  - serverless-webpack
+  - '@silvermine/serverless-plugin-cloudfront-lambda-edge'
+
+provider:
+  name: aws
+  runtime: nodejs10.x
+  environment:
+    AWS_NODEJS_CONNECTION_REUSE_ENABLED: 1
+    SLS_SVC_NAME: ${self:service}
+    SLS_STAGE: ${self:custom.stage}
+  region: us-east-1
+  memorySize: 128
+  timeout: 5
+
+functions:
+  cookie:
+    handler: handler.cookie
+    lambdaAtEdge:
+      distribution: 'WebsiteDistribution'
+      eventType: 'viewer-request'
+  test:
+    handler: handler.test
+    lambdaAtEdge:
+      distribution: 'WebsiteDistribution'
+      eventType: 'origin-request'
+  setOriginCookie:
+    handler: handler.originCookie
+    lambdaAtEdge:
+      distribution: 'WebsiteDistribution'
+      eventType: 'origin-response'
+
+resources:
+   Resources:
+    WebsiteBucketA:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ab-test-a
+        AccessControl: PublicRead
+        WebsiteConfiguration:
+          IndexDocument: index.html
+          ErrorDocument: error.html
+    WebsiteBucketB:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ab-test-b
+        AccessControl: PublicRead
+        WebsiteConfiguration:
+          IndexDocument: index.html
+          ErrorDocument: error.html
+    WebsiteLog:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: ab-test-log
+    WebsiteBucketPolicyA:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        Bucket:
+          Ref: WebsiteBucketA
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource:
+                Fn::Sub: arn:aws:s3:::ab-test-a/*
+              Principal: "*"
+    WebsiteBucketPolicyB:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        Bucket:
+          Ref: WebsiteBucketB
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource:
+                Fn::Sub: arn:aws:s3:::ab-test-b/*
+              Principal: "*"
+    WebsiteDistribution:
+      Type: 'AWS::CloudFront::Distribution'
+      Properties:
+        DistributionConfig:
+          DefaultCacheBehavior:
+            TargetOriginId: 'WebsiteBucketOriginA'
+            ViewerProtocolPolicy: 'redirect-to-https'
+            DefaultTTL: 600
+            MaxTTL: 600
+            Compress: true
+            ForwardedValues:
+              QueryString: false
+              Cookies:
+                Forward: 'whitelist'
+                WhitelistedNames: ['X-Source']
+          DefaultRootObject: 'index.html'
+          Enabled: true
+          PriceClass: 'PriceClass_100'
+          HttpVersion: 'http2'
+          ViewerCertificate:
+            CloudFrontDefaultCertificate: true
+          Origins:
+            - Id: 'WebsiteBucketOriginA'
+              DomainName: { 'Fn::GetAtt': [ 'WebsiteBucketA', 'DomainName' ] }
+              S3OriginConfig: {}
+            - Id: 'WebsiteBucketOriginB'
+              DomainName: { 'Fn::GetAtt': [ 'WebsiteBucketB', 'DomainName' ] }
+              S3OriginConfig: {}
+          CustomErrorResponses:
+            - ErrorCachingMinTTL: 300
+              ErrorCode: 404
+              ResponseCode: 200
+              ResponsePagePath: /index.html
+            - ErrorCachingMinTTL: 300
+              ErrorCode: 403
+              ResponseCode: 200
+              ResponsePagePath: /index.html
+          Logging:
+            Bucket: ab-test-log.s3.amazonaws.com
+            IncludeCookies: true
+            Prefix: cloudfront/
